@@ -10,12 +10,17 @@ crate-type = ["rlib"]
 name = "grpc-web-server"
 path = "./src/bin/grpc-web-server.rs"
 
+[[bin]]
+name = "gen-certs"
+path = "./src/bin/gen-certs.rs"
+
 [dependencies]
 axum = "0.8.9"
 clap = { version = "4.6.6", features = ["derive"] }
 http = "1.5.0"
 hyper = "1.11.0"
 hyper-util = "0.1.20"
+rcgen = "0.14.9"
 tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 tonic = "0.14.6"
 tonic-web = "0.14.6"
