@@ -10,7 +10,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use rustls::{ClientConfig, RootCertStore};
-use rustls_pemfile::certs;
+use rustls_pemfile::{certs, private_key};
 use tonic::body::Body as TonicBody;
 use tower::Service;
 use tracing::debug;
@@ -53,6 +53,8 @@ impl Proxy {
     pub fn new(
         authority: &str,
         ca_cert: Option<&Path>,
+        proxy_cert: Option<&Path>,
+        proxy_key: Option<&Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let authority = authority.parse::<http::uri::Authority>()?;
 
@@ -69,9 +71,21 @@ impl Proxy {
             false
         };
 
-        let tls_config = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let tls_config = ClientConfig::builder().with_root_certificates(roots);
+        let tls_config = if let Some(proxy_cert) = proxy_cert
+            && let Some(proxy_key) = proxy_key
+        {
+            let mut cert_reader = BufReader::new(File::open(proxy_cert)?);
+            let cert_parsed = certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+
+            let mut key_reader = BufReader::new(File::open(proxy_key)?);
+            let key_parsed = private_key(&mut key_reader)?
+                .ok_or(format!("Failed to read {}", proxy_key.display()))?;
+
+            tls_config.with_client_auth_cert(cert_parsed, key_parsed)?
+        } else {
+            tls_config.with_no_client_auth()
+        };
 
         let mut http = HttpConnector::new();
         http.enforce_http(false);
@@ -97,7 +111,9 @@ impl Proxy {
 impl Service<Request<TonicBody>> for Proxy {
     type Response = Response<Incoming>;
     type Error = hyper_util::client::legacy::Error;
-    type Future = <Client<HttpConnector, TonicBody> as Service<Request<TonicBody>>>::Future;
+    type Future = <Client<hyper_rustls::HttpsConnector<HttpConnector>, TonicBody> as Service<
+        Request<TonicBody>,
+    >>::Future;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         // The underlying hyper client is cloneable and immediately ready for dispatch.

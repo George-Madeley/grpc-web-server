@@ -78,6 +78,8 @@ impl Server {
         let proxy = Proxy::new(
             server_options.grpc_address.as_str(),
             server_options.grpc_ca_cert.as_deref(),
+            server_options.grpc_proxy_cert.as_deref(),
+            server_options.grpc_proxy_key.as_deref(),
         )?;
         let grpc_web_proxy = GrpcWebLayer::new().layer(proxy);
         // `nest_service` only accepts services whose error type is `Infallible`. The gRPC-Web proxy can fail
