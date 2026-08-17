@@ -37,5 +37,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     tls::leaf::write(&args.out_dir, "proxy", &proxy)?;
 
+    let web = tls::leaf::issue(
+        &ca,
+        "web-server",
+        vec![
+            "web.local".to_string(),
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+        ],
+        ExtendedKeyUsagePurpose::ServerAuth,
+    )?;
+    tls::leaf::write(&args.out_dir, "web", &web)?;
+
     Ok(())
 }

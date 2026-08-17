@@ -42,15 +42,21 @@ struct Args {
     /// Logging verbosity level
     #[arg(long, value_enum, default_value_t = LogLevel::Info)]
     log_level: LogLevel,
-    /// The path to the CA cert used to generate the gRPC server and proxy certificates and keys. Required for TLS.
+    /// The path to the CA cert used to generate the gRPC server and proxy certificates and keys. Required for gRPC TLS.
     #[arg(long)]
     grpc_ca_cert: Option<PathBuf>,
-    /// The path to the gRPC proxy private key. Required for mTLS
+    /// The path to the gRPC proxy private key. Required for gRPC mTLS
     #[arg(long)]
     grpc_proxy_key: Option<PathBuf>,
-    /// The path to the gRPC proxy certification. Required for mTLS
+    /// The path to the gRPC proxy certification. Required for gRPC mTLS
     #[arg(long)]
     grpc_proxy_cert: Option<PathBuf>,
+    /// The path to the HTTP private key. Required for HTTP TLS
+    #[arg(long)]
+    http_key: Option<PathBuf>,
+    /// The path to the HTTP certification. Required for HTTP TLS
+    #[arg(long)]
+    http_cert: Option<PathBuf>,
 }
 
 impl Into<ServerOptions> for Args {
@@ -62,6 +68,8 @@ impl Into<ServerOptions> for Args {
             grpc_ca_cert: self.grpc_ca_cert,
             grpc_proxy_key: self.grpc_proxy_key,
             grpc_proxy_cert: self.grpc_proxy_cert,
+            http_key: self.http_key,
+            http_cert: self.http_cert,
         }
     }
 }

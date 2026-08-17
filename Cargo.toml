@@ -16,6 +16,7 @@ path = "./src/bin/gen-certs.rs"
 
 [dependencies]
 axum = "0.8.9"
+axum-server = { version = "0.8.0", features = ["rustls", "tls-rustls"] }
 clap = { version = "4.6.6", features = ["derive"] }
 http = "1.5.0"
 hyper = "1.11.0"

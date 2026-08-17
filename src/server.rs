@@ -1,6 +1,8 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::{Router, error_handling::HandleError, routing::get_service, serve};
+use axum_server::tls_rustls::RustlsConfig;
 use http::StatusCode;
 use tokio::net::TcpListener;
 use tonic_web::GrpcWebLayer;
@@ -29,21 +31,35 @@ pub struct ServerOptions {
     pub grpc_proxy_key: Option<PathBuf>,
     /// The path to the gRPC proxy certification. Required for mTLS
     pub grpc_proxy_cert: Option<PathBuf>,
+    /// The path to the HTTP private key. Required for HTTP TLS
+    pub http_key: Option<PathBuf>,
+    /// The path to the HTTP certification. Required for HTTP TLS
+    pub http_cert: Option<PathBuf>,
 }
 
 impl ServerOptions {
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.grpc_proxy_key.is_some() ^ self.grpc_proxy_cert.is_some() {
             if self.grpc_ca_cert.is_none() {
-                return Err("grpc_ca_cert must be defined for mTLS".into());
+                return Err("grpc_ca_cert must be defined for gRPC mTLS".into());
             }
             if self.grpc_proxy_key.is_none() {
-                return Err("grpc_proxy_key must be defined for mTLS".into());
+                return Err("grpc_proxy_key must be defined for gRPC mTLS".into());
             }
             if self.grpc_proxy_cert.is_none() {
-                return Err("grpc_proxy_cert must be defined for mTLS".into());
+                return Err("grpc_proxy_cert must be defined for gRPC mTLS".into());
             }
         }
+
+        if self.http_key.is_some() ^ self.http_cert.is_some() {
+            if self.http_cert.is_none() {
+                return Err("http_cert must be defined for HTTP TLS".into());
+            }
+            if self.http_key.is_none() {
+                return Err("http_key must be defined for mTLS".into());
+            }
+        }
+
         Ok(())
     }
 }
@@ -150,11 +166,21 @@ impl Server {
     }
 
     pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind(&self.options.http_address).await?;
-        info!(
-            "HTTP server bound: http://{}",
-            listener.local_addr()?.to_string()
-        );
+        let addr: SocketAddr = self.options.http_address.parse()?;
+        if let (Some(cert_path), Some(key_path)) = (
+            self.options.http_cert.as_deref(),
+            self.options.http_key.as_deref(),
+        ) {
+            let tls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
+            info!("HTTPS server bound: https://{}", addr);
+            axum_server::bind_rustls(addr, tls_config)
+                .serve(self.router.clone().into_make_service())
+                .await?;
+            return Ok(());
+        }
+
+        let listener = TcpListener::bind(addr).await?;
+        info!("HTTP server bound: http://{}", listener.local_addr()?);
         serve(listener, self.router.clone()).await?;
         Ok(())
     }
