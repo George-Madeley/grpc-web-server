@@ -118,7 +118,16 @@ impl Server {
         let cors = CorsLayer::new()
             .allow_origin(Any)
             .allow_methods(Any)
-            .allow_headers(Any);
+            .allow_headers(Any)
+            .expose_headers([
+                http::HeaderName::from_static("grpc-accept-encoding"),
+                http::HeaderName::from_static("grpc-encoding"),
+                http::HeaderName::from_static("grpc-message"),
+                http::HeaderName::from_static("grpc-status"),
+                http::HeaderName::from_static("grpc-status-details-bin"),
+                http::header::CONTENT_TYPE,
+                http::header::SET_COOKIE,
+            ]);
         router.layer(cors)
     }
 
