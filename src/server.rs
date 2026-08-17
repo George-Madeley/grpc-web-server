@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use axum::{Router, error_handling::HandleError, routing::get_service, serve};
 use http::StatusCode;
 use tokio::net::TcpListener;
@@ -21,6 +23,29 @@ pub struct ServerOptions {
     pub grpc_address: String,
     /// The directory of the static web files to host
     pub static_dir: Option<String>,
+    /// The path to the CA cert used to generate the gRPC server and proxy certificates and keys. Required for TLS.
+    pub grpc_ca_cert: Option<PathBuf>,
+    /// The path to the gRPC proxy private key. Required for mTLS
+    pub grpc_proxy_key: Option<PathBuf>,
+    /// The path to the gRPC proxy certification. Required for mTLS
+    pub grpc_proxy_cert: Option<PathBuf>,
+}
+
+impl ServerOptions {
+    pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.grpc_proxy_key.is_some() ^ self.grpc_proxy_cert.is_some() {
+            if self.grpc_ca_cert.is_none() {
+                return Err("grpc_ca_cert must be defined for mTLS".into());
+            }
+            if self.grpc_proxy_key.is_none() {
+                return Err("grpc_proxy_key must be defined for mTLS".into());
+            }
+            if self.grpc_proxy_cert.is_none() {
+                return Err("grpc_proxy_cert must be defined for mTLS".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -31,6 +56,8 @@ pub struct Server {
 
 impl Server {
     pub fn new(server_options: ServerOptions) -> Result<Self, Box<dyn std::error::Error>> {
+        server_options.validate()?;
+
         let mut router = Router::new();
 
         router = Self::add_proxy(&server_options, router)?;
@@ -48,7 +75,10 @@ impl Server {
         server_options: &ServerOptions,
         router: Router,
     ) -> Result<Router, Box<dyn std::error::Error>> {
-        let proxy = Proxy::new(server_options.grpc_address.as_str())?;
+        let proxy = Proxy::new(
+            server_options.grpc_address.as_str(),
+            server_options.grpc_ca_cert.as_deref(),
+        )?;
         let grpc_web_proxy = GrpcWebLayer::new().layer(proxy);
         // `nest_service` only accepts services whose error type is `Infallible`. The gRPC-Web proxy can fail
         // with upstream transport errors, so we map those failures into an HTTP 502 response to satisfy Axum's
@@ -56,7 +86,15 @@ impl Server {
         let grpc_web_proxy = HandleError::new(
             grpc_web_proxy,
             |err: hyper_util::client::legacy::Error| async move {
-                error!(error = %err, "gRPC upstream unavailable");
+                let err: &dyn std::error::Error = &err;
+                let mut out = err.to_string();
+                let mut cur = err.source();
+                while let Some(src) = cur {
+                    out.push_str(" | caused by: ");
+                    out.push_str(&src.to_string());
+                    cur = src.source();
+                }
+                error!(error = %err, error_chain = %out, "gRPC upstream unavailable");
                 (StatusCode::BAD_GATEWAY, "Plugin gRPC upstream unavailable")
             },
         );

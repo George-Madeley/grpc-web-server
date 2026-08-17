@@ -1,10 +1,16 @@
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 use std::task::{Context, Poll};
 
 use http::{Request, Response, Uri};
 use hyper::body::Incoming;
+use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use rustls::{ClientConfig, RootCertStore};
+use rustls_pemfile::certs;
 use tonic::body::Body as TonicBody;
 use tower::Service;
 use tracing::debug;
@@ -23,9 +29,10 @@ use tracing::debug;
 #[derive(Clone)]
 pub struct Proxy {
     /// HTTP/2 client used to reach plugin upstreams.
-    client: Client<HttpConnector, TonicBody>,
+    client: Client<hyper_rustls::HttpsConnector<HttpConnector>, TonicBody>,
     /// Upstream authority in host:port form.
     authority: http::uri::Authority,
+    use_tls: bool,
 }
 
 impl Proxy {
@@ -43,16 +50,47 @@ impl Proxy {
     ///
     /// # Errors
     /// Returns an error when `authority` is not a valid HTTP authority value.
-    pub fn new(authority: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        authority: &str,
+        ca_cert: Option<&Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let authority = authority.parse::<http::uri::Authority>()?;
 
-        let mut connector = HttpConnector::new();
-        connector.enforce_http(false);
+        let mut roots = RootCertStore::empty();
+        let use_tls = if let Some(path) = ca_cert {
+            let mut reader = BufReader::new(File::open(path)?);
+            let parsed = certs(&mut reader).collect::<Result<Vec<_>, _>>()?;
+            let (added, _) = roots.add_parsable_certificates(parsed);
+            if added == 0 {
+                return Err("no CA certs loaded from grpc_ca_cert".into());
+            }
+            true
+        } else {
+            false
+        };
+
+        let tls_config = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let mut http = HttpConnector::new();
+        http.enforce_http(false);
+
+        let https = HttpsConnectorBuilder::new()
+            .with_tls_config(tls_config)
+            .https_or_http()
+            .enable_http2()
+            .wrap_connector(http);
 
         let client = Client::builder(TokioExecutor::new())
             .http2_only(true)
-            .build(connector);
-        Ok(Self { client, authority })
+            .build(https);
+
+        Ok(Self {
+            client,
+            authority,
+            use_tls,
+        })
     }
 }
 
@@ -75,15 +113,18 @@ impl Service<Request<TonicBody>> for Proxy {
             .map(|pq| pq.as_str())
             .unwrap_or("/");
 
+        let scheme = if self.use_tls { "https" } else { "http" };
+
         debug!(
             method = %parts.method,
             path = %path_and_query,
             upstream = %self.authority,
+            scheme = %scheme,
             "Forwarding request to gRPC upstream"
         );
 
         let upstream_uri = Uri::builder()
-            .scheme("http")
+            .scheme(scheme)
             .authority(self.authority.as_str())
             .path_and_query(path_and_query)
             .build()

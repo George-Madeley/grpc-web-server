@@ -20,7 +20,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let server = tls::leaf::issue(
         &ca,
         "grpc-server",
-        vec!["grpc.local".to_string()],
+        vec![
+            "grpc.local".to_string(),
+            "127.0.0.1".to_string(),
+            "localhost".to_string(),
+        ],
         ExtendedKeyUsagePurpose::ServerAuth,
     )?;
     tls::leaf::write(&args.out_dir, "server", &server)?;

@@ -19,8 +19,11 @@ axum = "0.8.9"
 clap = { version = "4.6.6", features = ["derive"] }
 http = "1.5.0"
 hyper = "1.11.0"
+hyper-rustls = { version = "0.27.9", features = ["http2"] }
 hyper-util = "0.1.20"
 rcgen = "0.14.9"
+rustls = "0.23.43"
+rustls-pemfile = "2.2.0"
 tokio = { version = "1.53.1", features = ["rt-multi-thread"] }
 tonic = "0.14.6"
 tonic-web = "0.14.6"
