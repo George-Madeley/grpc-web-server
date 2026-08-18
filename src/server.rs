@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -38,6 +39,17 @@ pub struct ServerOptions {
 }
 
 impl ServerOptions {
+    /// Validates TLS and mTLS option combinations before server startup.
+    ///
+    /// # Returns
+    /// Ok when all option dependencies are satisfied.
+    ///
+    /// # Errors
+    /// - `grpc_ca_cert` is missing when gRPC mTLS options are partially set.
+    /// - `grpc_proxy_key` is missing when gRPC mTLS options are partially set.
+    /// - `grpc_proxy_cert` is missing when gRPC mTLS options are partially set.
+    /// - `http_key` is missing when HTTP TLS options are partially set.
+    /// - `http_cert` is missing when HTTP TLS options are partially set.
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.grpc_proxy_key.is_some() ^ self.grpc_proxy_cert.is_some() {
             if self.grpc_ca_cert.is_none() {
@@ -71,6 +83,17 @@ pub struct Server {
 }
 
 impl Server {
+    /// Builds a configured server instance from validated options.
+    ///
+    /// # Arguments
+    /// - `server_options`: Startup configuration for addresses, web assets, and optional TLS settings.
+    ///
+    /// # Returns
+    /// Server instance when validation succeeds and routes are configured.
+    ///
+    /// # Errors
+    /// - Any error returned by `ServerOptions::validate`.
+    /// - Any error returned while constructing the upstream proxy service.
     pub fn new(server_options: ServerOptions) -> Result<Self, Box<dyn std::error::Error>> {
         server_options.validate()?;
 
@@ -87,6 +110,18 @@ impl Server {
         })
     }
 
+    /// Mounts the gRPC-Web proxy service at `/api`.
+    ///
+    /// # Arguments
+    /// - `server_options`: Source of upstream gRPC connection settings.
+    /// - `router`: Router to extend with the proxy service.
+    ///
+    /// # Returns
+    /// - Router instance with the `/api` proxy route mounted.
+    ///
+    /// # Errors
+    /// - Upstream authority parsing fails.
+    /// - TLS or certificate setup for the proxy fails.
     fn add_proxy(
         server_options: &ServerOptions,
         router: Router,
@@ -119,6 +154,14 @@ impl Server {
         Ok(router.nest_service("/api", grpc_web_proxy))
     }
 
+    /// Configures static file hosting fallback when `static_dir` is set.
+    ///
+    /// # Arguments
+    /// - `server_options`: Source of the optional static directory path.
+    /// - `router`: Router to extend with static file fallback handling.
+    ///
+    /// # Returns
+    /// - A router that either includes static file fallback handling or is returned unchanged.
     fn add_web(server_options: &ServerOptions, router: Router) -> Router {
         match &server_options.static_dir {
             Some(static_dir) => {
@@ -132,6 +175,13 @@ impl Server {
         }
     }
 
+    /// Applies permissive CORS suitable for browser gRPC-Web clients.
+    ///
+    /// # Arguments
+    /// - `router`: Router to wrap with CORS middleware.
+    ///
+    /// # Returns
+    /// - A router with CORS middleware attached.
     fn add_cors(router: Router) -> Router {
         let cors = CorsLayer::new()
             .allow_origin(Any)
@@ -149,6 +199,13 @@ impl Server {
         router.layer(cors)
     }
 
+    /// Attaches request tracing middleware for observability.
+    ///
+    /// # Arguments
+    /// - `router`: Router to wrap with tracing middleware.
+    ///
+    /// # Returns
+    /// - A router with HTTP request tracing enabled.
     fn add_observability(router: Router) -> Router {
         router.layer(
             TraceLayer::new_for_http()
@@ -165,23 +222,62 @@ impl Server {
         )
     }
 
-    pub async fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Runs the HTTP/HTTPS server until it exits or a shutdown signal resolves.
+    ///
+    /// # Arguments
+    /// - `shutdown_signal`: Future that resolves when shutdown should begin.
+    ///
+    /// # Returns
+    /// Ok when the server exits normally or shutdown is requested.
+    ///
+    /// # Errors
+    /// - `http_address` cannot be parsed into a socket address.
+    /// - HTTP listener binding fails.
+    /// - HTTPS certificate or key loading fails.
+    /// - HTTP or HTTPS serving fails with an I/O or runtime server error.
+    pub async fn start<F>(&self, shutdown_signal: F) -> Result<(), Box<dyn std::error::Error>>
+    where
+        F: Future<Output = ()> + Send,
+    {
         let addr: SocketAddr = self.options.http_address.parse()?;
+        tokio::pin!(shutdown_signal);
+
         if let (Some(cert_path), Some(key_path)) = (
             self.options.http_cert.as_deref(),
             self.options.http_key.as_deref(),
         ) {
             let tls_config = RustlsConfig::from_pem_file(cert_path, key_path).await?;
             info!("HTTPS server bound: https://{}", addr);
-            axum_server::bind_rustls(addr, tls_config)
-                .serve(self.router.clone().into_make_service())
-                .await?;
+            let server = axum_server::bind_rustls(addr, tls_config)
+                .serve(self.router.clone().into_make_service());
+            tokio::pin!(server);
+            tokio::select! {
+                res = &mut server => {
+                    res?;
+                }
+                _ = &mut shutdown_signal => {
+                    info!("Shutdown signal received for HTTPS server");
+                }
+            }
             return Ok(());
         }
 
         let listener = TcpListener::bind(addr).await?;
         info!("HTTP server bound: http://{}", listener.local_addr()?);
-        serve(listener, self.router.clone()).await?;
+        let server = serve(listener, self.router.clone()).into_future();
+        // Pins a future to a stable memory location on the stack. Needed when a future may be polled multiple times and
+        // is no Unpin. This enables passing mutable references to select safely.
+        tokio::pin!(server);
+        // Waits on multiple async branches concurrently. FIrst branch that completes wins; other branches are
+        // cancelled. Either the server exits, or shutdown signal arrives.
+        tokio::select! {
+            res = &mut server => {
+                res?;
+            }
+            _ = &mut shutdown_signal => {
+                info!("Shutdown signal received for HTTP server");
+            }
+        }
         Ok(())
     }
 }

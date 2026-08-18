@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["staticlib", "rlib"]
 
 [[bin]]
 name = "grpc-web-server"
@@ -32,3 +32,6 @@ tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["fs", "cors", "trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[build-dependencies]
+cbindgen = "0.29.4"

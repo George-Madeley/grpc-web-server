@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let server = Server::new(args.into())?;
-    if let Err(err) = server.start().await {
+    if let Err(err) = server.start(std::future::pending()).await {
         error!(error = %err, "Server exited with error");
         return Err(err);
     }
