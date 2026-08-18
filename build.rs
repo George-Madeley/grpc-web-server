@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = cbindgen::Config::default();
     config.pragma_once = true;
-    config.namespace = Some(String::from("grpc_web_proxy"));
+    config.namespace = Some(String::from("grpc_web_server"));
     config.braces = cbindgen::Braces::NextLine;
     config.language = cbindgen::Language::C;
     config.line_length = 120;
@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_config(config)
         .generate()
         .expect("Unable to generate bindings")
-        .write_to_file(out_dir.join("grpc_web_proxy.h"));
+        .write_to_file(out_dir.join("grpc_web_server.h"));
 
     Ok(())
 }

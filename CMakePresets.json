@@ -2,7 +2,7 @@
   "version": 3,
   "configurePresets": [
     {
-      "name": "gRPC Web Proxy (Debug)",
+      "name": "gRPC Web Server (Debug)",
       "binaryDir": "${sourceDir}/target/debug/cmake/x64-linux",
       "generator": "Ninja",
       "cacheVariables": {
@@ -10,7 +10,7 @@
       }
     },
     {
-      "name": "gRPC Web Proxy (Release)",
+      "name": "gRPC Web Server (Release)",
       "binaryDir": "${sourceDir}/target/release/cmake/x64-linux",
       "generator": "Ninja",
       "cacheVariables": {
@@ -20,12 +20,12 @@
   ],
   "buildPresets": [
     {
-      "name": "gRPC Web Proxy (Debug)",
-      "configurePreset": "gRPC Web Proxy (Debug)"
+      "name": "gRPC Web Server (Debug)",
+      "configurePreset": "gRPC Web Server (Debug)"
     },
     {
-      "name": "gRPC Web Proxy (Release)",
-      "configurePreset": "gRPC Web Proxy (Release)"
+      "name": "gRPC Web Server (Release)",
+      "configurePreset": "gRPC Web Server (Release)"
     }
   ]
 }
