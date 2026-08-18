@@ -9,9 +9,34 @@ use std::{
 };
 
 use tokio::sync::oneshot;
+use tracing::{error, info};
+use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::server::{Server, ServerOptions};
 
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warn => "warn",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 #[repr(C)]
 pub struct GrpcWebProxyOptions {
     /// The address to host the HTTP/1.1 proxy/web server on.
@@ -30,6 +55,8 @@ pub struct GrpcWebProxyOptions {
     pub http_key: *const c_char,
     /// The path to the HTTP certification. Required for HTTP TLS
     pub http_cert: *const c_char,
+    /// Logging verbosity level
+    pub log_level: LogLevel,
 }
 
 impl GrpcWebProxyOptions {
@@ -127,7 +154,7 @@ fn cleanup_finished_locked(state: &mut FfiServerState) {
 
     if handle.is_finished() {
         if handle.join().is_err() {
-            eprintln!("grpc-web-server: server thread panicked");
+            error!("grpc-web-server: server thread panicked");
         }
         state.stop_tx = None;
         SERVER_RUNNING.store(false, Ordering::Release);
@@ -148,19 +175,32 @@ pub unsafe extern "C" fn start(options: GrpcWebProxyOptions) {
     // prevents Rust panics from unwinding across C FFI boundaries. Unwinding across FFI is undefined behaviour, so this
     // is protective.
     let _ = std::panic::catch_unwind(|| {
+        let filter = EnvFilter::new(format!(
+            "grpc_web_server={},tower_http=info",
+            options.clone().log_level.as_str()
+        ));
+        fmt().with_env_filter(filter).init();
+
         let server_options: ServerOptions = match options.try_into() {
             Ok(options) => options,
             Err(err) => {
-                eprintln!("grpc-web-server: invalid options: {err}");
+                error!("grpc-web-server: invalid options: {err}");
                 return;
             }
         };
+
+        info!(
+            http_address = %server_options.http_address,
+            grpc_address = %server_options.grpc_address,
+            static_dir = ?server_options.static_dir,
+            "Starting grpc-web-server"
+        );
 
         let state = server_state();
         let mut state = match state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                eprintln!("grpc-web-server: state lock poisoned");
+                error!("grpc-web-server: state lock poisoned");
                 poisoned.into_inner()
             }
         };
@@ -186,7 +226,7 @@ pub unsafe extern "C" fn start(options: GrpcWebProxyOptions) {
             {
                 Ok(runtime) => runtime,
                 Err(err) => {
-                    eprintln!("grpc-web-server: failed to create tokio runtime: {err}");
+                    error!("grpc-web-server: failed to create tokio runtime: {err}");
                     SERVER_RUNNING.store(false, Ordering::Release);
                     return;
                 }
@@ -196,7 +236,7 @@ pub unsafe extern "C" fn start(options: GrpcWebProxyOptions) {
             let server = match Server::new(server_options) {
                 Ok(server) => server,
                 Err(err) => {
-                    eprintln!("grpc-web-server: failed to create server: {err}");
+                    error!("grpc-web-server: failed to create server: {err}");
                     SERVER_RUNNING.store(false, Ordering::Release);
                     return;
                 }
@@ -212,7 +252,7 @@ pub unsafe extern "C" fn start(options: GrpcWebProxyOptions) {
             // blocking until it is complete, and yielding its resolved result. Any tasks or timers which the future
             // spawns internally will be executed on the runtime.
             if let Err(err) = runtime.block_on(server.start(shutdown)) {
-                eprintln!("grpc-web-server: server exited with error: {err}");
+                error!("grpc-web-server: server exited with error: {err}");
             }
 
             // Set to false as the server clearly failed to launch properly
@@ -239,7 +279,7 @@ pub extern "C" fn wait() {
             let mut state = match state.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => {
-                    eprintln!("grpc-web-server: state lock poisoned");
+                    error!("grpc-web-server: state lock poisoned");
                     poisoned.into_inner()
                 }
             };
@@ -253,7 +293,7 @@ pub extern "C" fn wait() {
         // Await the thread join to wait until the server finishes executing
         if let Some(handle) = handle {
             if handle.join().is_err() {
-                eprintln!("grpc-web-server: server thread panicked");
+                error!("grpc-web-server: server thread panicked");
             }
         }
 
@@ -293,7 +333,7 @@ pub extern "C" fn stop() {
         let mut state = match state.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
-                eprintln!("grpc-web-server: state lock poisoned");
+                error!("grpc-web-server: state lock poisoned");
                 poisoned.into_inner()
             }
         };
