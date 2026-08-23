@@ -1,18 +1,13 @@
 use std::{
     ffi::{CStr, c_char},
     path::PathBuf,
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
+    sync::Once,
 };
 
-use tokio::sync::oneshot;
-use tracing::{error, info};
+use tracing::error;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::server::{Server, ServerOptions};
+use crate::{handle::GrpcWebServerHandle, server::ServerOptions};
 
 #[derive(Debug, Clone)]
 #[repr(C)]
@@ -75,6 +70,7 @@ impl GrpcWebProxyOptions {
         if ptr.is_null() {
             return Ok(None);
         }
+
         unsafe {
             let c_str = CStr::from_ptr(ptr);
             let rust_str = c_str.to_str()?;
@@ -122,224 +118,200 @@ impl TryInto<ServerOptions> for GrpcWebProxyOptions {
     }
 }
 
-#[derive(Default)]
-struct FfiServerState {
-    /// Join handle for the background thread that owns the Tokio runtime.
-    thread: Option<thread::JoinHandle<()>>,
-    /// One-shot sender used to request graceful shutdown.
-    stop_tx: Option<oneshot::Sender<()>>,
-}
+/// Process-wide one-time tracing initialization for all server handles.
+static TRACING_INIT: Once = Once::new();
 
-/// Lazily initialized process-wide server state used by FFI entry points.
-static SERVER_STATE: OnceLock<Mutex<FfiServerState>> = OnceLock::new();
-/// Fast atomic flag read by `is_running` to report runtime state across threads.
-static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
-
-/// Returns the singleton mutable state container used by FFI lifecycle functions.
+/// Initializes tracing once for the process.
 ///
-/// # Returns
-/// - A reference to the global mutex containing server lifecycle state.
-fn server_state() -> &'static Mutex<FfiServerState> {
-    SERVER_STATE.get_or_init(|| Mutex::new(FfiServerState::default()))
+/// The first created handle decides the initial log level. Later calls keep the
+/// existing subscriber and ignore new levels.
+fn init_tracing_once(level: LogLevel) {
+    TRACING_INIT.call_once(|| {
+        let filter = EnvFilter::new(format!("grpc_web_server={},tower_http=info", level.as_str()));
+        let _ = fmt().with_env_filter(filter).try_init();
+    });
 }
 
-/// Joins and clears a finished server thread while holding the state lock.
-///
-/// # Arguments
-/// - `state`: Mutable global FFI state guard.
-fn cleanup_finished_locked(state: &mut FfiServerState) {
-    let Some(handle) = state.thread.take() else {
-        return;
-    };
-
-    if handle.is_finished() {
-        if handle.join().is_err() {
-            error!("grpc-web-server: server thread panicked");
-        }
-        state.stop_tx = None;
-        SERVER_RUNNING.store(false, Ordering::Release);
-    } else {
-        state.thread = Some(handle);
-    }
-}
-
-/// Starts the proxy in a background thread and returns immediately.
+/// Creates a new server handle from FFI options.
 ///
 /// # Arguments
 /// - `options`: FFI server options passed from C/C++.
 ///
+/// # Returns
+/// - Non-null pointer to a newly allocated server handle on success.
+/// - Null pointer on option validation or allocation failure.
+///
+/// # Safety
+/// - Any non-null C string pointer in `options` must be valid and NUL-terminated.
+///
 /// # Panics
-/// - This function catches unwinds with `catch_unwind` to avoid unwinding across the FFI boundary.
+/// - This function catches unwinds to avoid unwinding across the FFI boundary.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn start(options: GrpcWebProxyOptions) {
-    // prevents Rust panics from unwinding across C FFI boundaries. Unwinding across FFI is undefined behaviour, so this
-    // is protective.
-    let _ = std::panic::catch_unwind(|| {
-        let filter = EnvFilter::new(format!(
-            "grpc_web_server={},tower_http=info",
-            options.clone().log_level.as_str()
-        ));
-        fmt().with_env_filter(filter).init();
+pub unsafe extern "C" fn create(options: GrpcWebProxyOptions) -> *mut GrpcWebServerHandle {
+    std::panic::catch_unwind(|| {
+        init_tracing_once(options.log_level.clone());
 
-        let server_options: ServerOptions = match options.try_into() {
+        let server_options = match options.try_into() {
             Ok(options) => options,
             Err(err) => {
                 error!("grpc-web-server: invalid options: {err}");
-                return;
+                return std::ptr::null_mut();
             }
         };
 
-        info!(
-            http_address = %server_options.http_address,
-            grpc_address = %server_options.grpc_address,
-            static_dir = ?server_options.static_dir,
-            "Starting grpc-web-server"
-        );
-
-        let state = server_state();
-        let mut state = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                error!("grpc-web-server: state lock poisoned");
-                poisoned.into_inner()
-            }
-        };
-
-        cleanup_finished_locked(&mut state);
-        if state.thread.is_some() || SERVER_RUNNING.load(Ordering::Acquire) {
-            return;
-        }
-
-        // Creates a pair: sender and receiver. One side sender once, the other receives once. We create `(stop_tx,
-        // stop_rx)`, store `stop_tx` globally, and await `stop_rx` in async shutdown logic
-        let (stop_tx, stop_rx) = oneshot::channel::<()>();
-        SERVER_RUNNING.store(true, Ordering::Release);
-
-        // Create a thread to allow `start` to be non-blocking
-        let thread = thread::spawn(move || {
-            // Tokio runtime is the async engine (scheduler, timers, I/O driver). Our background thread creates one
-            // runtime and then runs async server code with `block_on`. THis is the bridge between sync FFI entrypoints
-            // and async server internals
-            let runtime = match tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    error!("grpc-web-server: failed to create tokio runtime: {err}");
-                    SERVER_RUNNING.store(false, Ordering::Release);
-                    return;
-                }
-            };
-
-            // Create a new server
-            let server = match Server::new(server_options) {
-                Ok(server) => server,
-                Err(err) => {
-                    error!("grpc-web-server: failed to create server: {err}");
-                    SERVER_RUNNING.store(false, Ordering::Release);
-                    return;
-                }
-            };
-
-            // This creates a future that completes when `stop_tx` sends (or sender is dropped). `move` transfers the
-            // ownership of `stop_rx` into this future. THe server waits on this future as its shutdown trigger.
-            let shutdown = async move {
-                let _ = stop_rx.await;
-            };
-
-            // Runs a future to completion on the Tokio runtime. This runs the given future on the current thread,
-            // blocking until it is complete, and yielding its resolved result. Any tasks or timers which the future
-            // spawns internally will be executed on the runtime.
-            if let Err(err) = runtime.block_on(server.start(shutdown)) {
-                error!("grpc-web-server: server exited with error: {err}");
-            }
-
-            // Set to false as the server clearly failed to launch properly
-            SERVER_RUNNING.store(false, Ordering::Release);
-        });
-
-        state.stop_tx = Some(stop_tx);
-        state.thread = Some(thread);
-    });
+        let handle = GrpcWebServerHandle::new(server_options);
+        Box::into_raw(Box::new(handle))
+    })
+    .unwrap_or(std::ptr::null_mut())
 }
 
-/// Blocks until the current background server thread exits.
+/// Starts a server handle in a background thread.
 ///
-/// # Panics
-/// - This function catches unwinds with `catch_unwind` to avoid unwinding across the FFI boundary.
-#[unsafe(no_mangle)]
-pub extern "C" fn wait() {
-    // prevents Rust panics from unwinding across C FFI boundaries. Unwinding across FFI is undefined behaviour, so this
-    // is protective.
-    let _ = std::panic::catch_unwind(|| {
-        // Get the server thread handle
-        let handle = {
-            let state = server_state();
-            let mut state = match state.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    error!("grpc-web-server: state lock poisoned");
-                    poisoned.into_inner()
-                }
-            };
-            let handle = state.thread.take();
-            if handle.is_none() {
-                state.stop_tx = None;
-            }
-            handle
-        };
-
-        // Await the thread join to wait until the server finishes executing
-        if let Some(handle) = handle {
-            if handle.join().is_err() {
-                error!("grpc-web-server: server thread panicked");
-            }
-        }
-
-        // Clean up
-        let state = server_state();
-        let mut state = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        state.stop_tx = None;
-        SERVER_RUNNING.store(false, Ordering::Release);
-    });
-}
-
-/// Returns `true` if the proxy runtime is currently marked as running.
+/// # Arguments
+/// - `handle`: Pointer returned by `create`.
 ///
 /// # Returns
-/// - `true` when the runtime is marked running, otherwise `false`.
+/// - `true` when a new background runtime is started.
+/// - `false` when `handle` is null, already running, or startup fails.
+///
+/// # Safety
+/// - `handle` must point to a valid handle created by `create`.
+///
+/// # Panics
+/// - This function catches unwinds to avoid unwinding across the FFI boundary.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn start(handle: *mut GrpcWebServerHandle) -> bool {
+    std::panic::catch_unwind(|| {
+        if handle.is_null() {
+            return false;
+        }
+
+        let handle = unsafe { &*handle };
+        if let Err(err) = handle.start() {
+            error!("grpc-web-server: failed to start handle: {err}");
+            return false;
+        }
+
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Blocks until the background server thread for `handle` exits.
+///
+/// If the server is running, this call waits for completion. If it is not
+/// running, the function returns `true` immediately.
+///
+/// # Arguments
+/// - `handle`: Pointer returned by `create`.
+///
+/// # Returns
+/// - `true` when the call completes successfully.
+/// - `false` when `handle` is null.
+///
+/// # Safety
+/// - `handle` must point to a valid handle created by `create`.
+///
+/// # Panics
+/// - This function catches unwinds to avoid unwinding across the FFI boundary.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wait(handle: *mut GrpcWebServerHandle) -> bool {
+    std::panic::catch_unwind(|| {
+        if handle.is_null() {
+            return false;
+        }
+
+        let handle = unsafe { &*handle };
+        if let Err(err) = handle.wait() {
+            error!("grpc-web-server: failed to wait for handle: {err}");
+            return false;
+        }
+
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Returns `true` if `handle` is currently marked as running.
+///
+/// # Arguments
+/// - `handle`: Pointer returned by `create`.
+///
+/// # Returns
+/// - `true` when the handle runtime is marked running, otherwise `false`.
+/// - `false` when `handle` is null.
+///
+/// # Safety
+/// - `handle` must point to a valid handle created by `create`.
 ///
 /// # Panics
 /// - This function does not intentionally panic.
 #[unsafe(no_mangle)]
-pub extern "C" fn is_running() -> bool {
-    SERVER_RUNNING.load(Ordering::Acquire)
+pub unsafe extern "C" fn is_running(handle: *const GrpcWebServerHandle) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+
+    let handle = unsafe { &*handle };
+    handle.is_running()
 }
 
-/// Requests graceful shutdown for the running server, if any.
+/// Requests graceful shutdown for a running server handle, if any.
+///
+/// # Arguments
+/// - `handle`: Pointer returned by `create`.
+///
+/// # Returns
+/// - `true` when the stop signal is sent or no running server exists.
+/// - `false` when `handle` is null.
+///
+/// # Safety
+/// - `handle` must point to a valid handle created by `create`.
 ///
 /// # Panics
-/// - This function catches unwinds with `catch_unwind` to avoid unwinding across the FFI boundary.
+/// - This function catches unwinds to avoid unwinding across the FFI boundary.
 #[unsafe(no_mangle)]
-pub extern "C" fn stop() {
-    // prevents Rust panics from unwinding across C FFI boundaries. Unwinding across FFI is undefined behaviour, so this
-    // is protective.
-    let _ = std::panic::catch_unwind(|| {
-        let state = server_state();
-        let mut state = match state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                error!("grpc-web-server: state lock poisoned");
-                poisoned.into_inner()
-            }
-        };
-
-        if let Some(stop_tx) = state.stop_tx.take() {
-            let _ = stop_tx.send(());
+pub unsafe extern "C" fn stop(handle: *mut GrpcWebServerHandle) -> bool {
+    std::panic::catch_unwind(|| {
+        if handle.is_null() {
+            return false;
         }
-    });
+
+        let handle = unsafe { &*handle };
+        if let Err(err) = handle.stop() {
+            error!("grpc-web-server: failed to stop handle: {err}");
+            return false;
+        }
+
+        true
+    })
+    .unwrap_or(false)
+}
+
+/// Destroys a server handle and releases all owned resources.
+///
+/// If a server thread is still active, this function requests graceful shutdown
+/// and blocks until the thread exits before freeing the handle.
+///
+/// # Arguments
+/// - `handle`: Pointer returned by `create`.
+///
+/// # Returns
+/// - `true` when resources are released.
+/// - `false` when `handle` is null.
+///
+/// # Safety
+/// - `handle` must be a pointer returned by `create`.
+/// - `handle` must be destroyed at most once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn destroy(handle: *mut GrpcWebServerHandle) -> bool {
+    std::panic::catch_unwind(|| {
+        if handle.is_null() {
+            return false;
+        }
+
+        let _ = unsafe { Box::from_raw(handle) };
+        true
+    })
+    .unwrap_or(false)
 }

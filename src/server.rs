@@ -18,7 +18,7 @@ use tracing::{error, info};
 
 use crate::proxy::Proxy;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ServerOptions {
     /// The address to host the HTTP/1.1 proxy/web server on.
     pub http_address: String,
