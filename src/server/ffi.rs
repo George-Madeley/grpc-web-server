@@ -8,7 +8,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 use std::ffi::c_char;
 
 use super::{handle, server as server_impl};
-use crate::utils::required_c_string;
+use crate::utils::{collect_c_string_vector, required_c_string};
 
 /// Logging verbosity for a server handle.
 ///
@@ -41,6 +41,96 @@ impl LogLevel {
     }
 }
 
+/// C-compatible CORS settings for one gRPC-Web server instance.
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub struct GrpcWebCorsOptions {
+    /// Pointer to an array of allowed origin strings.
+    pub allowed_origins: *const *const c_char,
+    /// Number of entries in `allowed_origins`.
+    pub allowed_origins_count: usize,
+    /// Whether to allow any origin (`*`).
+    pub allow_any_origin: bool,
+    /// Pointer to an array of allowed HTTP method strings.
+    pub allowed_methods: *const *const c_char,
+    /// Number of entries in `allowed_methods`.
+    pub allowed_methods_count: usize,
+    /// Whether to allow any request method.
+    pub allow_any_method: bool,
+    /// Pointer to an array of allowed request header names.
+    pub allowed_headers: *const *const c_char,
+    /// Number of entries in `allowed_headers`.
+    pub allowed_headers_count: usize,
+    /// Whether to allow any request header.
+    pub allow_any_header: bool,
+    /// Whether to send `Access-Control-Allow-Credentials: true`.
+    pub allow_credentials: bool,
+}
+
+impl TryInto<server_impl::CorsPolicy> for GrpcWebCorsOptions {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_into(self) -> Result<server_impl::CorsPolicy, Self::Error> {
+        let origin_values =
+            unsafe { collect_c_string_vector(self.allowed_origins, self.allowed_origins_count)? };
+        let allowed_origins = origin_values
+            .iter()
+            .map(|val| {
+                http::HeaderValue::from_str(val.as_str())
+                    .map_err(|err| format!("invalid CORS origin '{val}': {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let method_values =
+            unsafe { collect_c_string_vector(self.allowed_methods, self.allowed_methods_count)? };
+        let allowed_methods = method_values
+            .iter()
+            .map(|val| {
+                http::Method::from_bytes(val.as_bytes())
+                    .map_err(|err| format!("invalid CORS method '{val}': {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let header_values =
+            unsafe { collect_c_string_vector(self.allowed_headers, self.allowed_headers_count)? };
+        let allowed_headers = header_values
+            .iter()
+            .map(|val| {
+                http::HeaderName::from_bytes(val.as_bytes())
+                    .map_err(|err| format!("invalid CORS header '{val}': {err}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(server_impl::CorsPolicy {
+            allowed_origins: if self.allow_any_origin {
+                None
+            } else if allowed_origins.is_empty() {
+                Some(Vec::new())
+            } else {
+                Some(allowed_origins)
+            },
+            allow_any_origin: self.allow_any_origin,
+            allowed_methods: if self.allow_any_method {
+                None
+            } else if allowed_methods.is_empty() {
+                Some(Vec::new())
+            } else {
+                Some(allowed_methods)
+            },
+            allow_any_method: self.allow_any_method,
+            allowed_headers: if self.allow_any_header {
+                None
+            } else if allowed_headers.is_empty() {
+                Some(Vec::new())
+            } else {
+                Some(allowed_headers)
+            },
+            allow_any_header: self.allow_any_header,
+            allow_credentials: self.allow_credentials,
+        })
+    }
+}
+
 /// C-compatible options used to configure one gRPC-Web server handle.
 ///
 /// Each non-null string pointer must refer to a valid, NUL-terminated UTF-8
@@ -69,6 +159,8 @@ pub struct GrpcWebServerOptions {
     pub http_cert: *const c_char,
     /// Process-wide tracing verbosity selected by the first created handle.
     pub log_level: LogLevel,
+    /// Browser-facing CORS settings for this server instance.
+    pub cors_options: GrpcWebCorsOptions,
 }
 
 impl TryInto<server_impl::GrpcWebServerOptions> for GrpcWebServerOptions {
@@ -92,6 +184,7 @@ impl TryInto<server_impl::GrpcWebServerOptions> for GrpcWebServerOptions {
             grpc_proxy_cert: optional_string(self.grpc_proxy_cert)?.map(PathBuf::from),
             http_key: optional_string(self.http_key)?.map(PathBuf::from),
             http_cert: optional_string(self.http_cert)?.map(PathBuf::from),
+            cors_policy: self.cors_options.try_into()?,
         })
     }
 }

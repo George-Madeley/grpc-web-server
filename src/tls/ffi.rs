@@ -1,8 +1,8 @@
 //! TLS certificate-authority and leaf-certificate FFI functions.
 
-use std::{panic::AssertUnwindSafe, path::Path, slice};
+use std::{panic::AssertUnwindSafe, path::Path};
 
-use crate::utils::required_c_string;
+use crate::utils::{collect_c_string_vector, required_c_string};
 use rcgen::{CertifiedIssuer, ExtendedKeyUsagePurpose, KeyPair};
 use std::ffi::c_char;
 
@@ -34,28 +34,6 @@ impl From<CertificateUsage> for ExtendedKeyUsagePurpose {
             CertificateUsage::ClientAuth => Self::ClientAuth,
         }
     }
-}
-
-/// Converts a C array of strings into certificate subject alternative names.
-///
-/// # Safety
-/// When `count` is non-zero, `values` must point to `count` valid pointers
-/// to NUL-terminated UTF-8 C strings.
-unsafe fn collect_subject_alt_names(
-    values: *const *const c_char,
-    count: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    if values.is_null() {
-        return Err("subject_alt_names must be defined when count is non-zero".into());
-    }
-
-    unsafe { slice::from_raw_parts(values, count) }
-        .iter()
-        .map(|&value| unsafe { required_c_string(value) })
-        .collect()
 }
 
 /// Creates a heap-allocated certificate authority.
@@ -136,7 +114,7 @@ pub unsafe extern "C" fn issue_leaf_certificate(
             Err(_) => return std::ptr::null_mut(),
         };
         let subject_alt_names =
-            match unsafe { collect_subject_alt_names(subject_alt_names, subject_alt_name_count) } {
+            match unsafe { collect_c_string_vector(subject_alt_names, subject_alt_name_count) } {
                 Ok(subject_alt_names) => subject_alt_names,
                 Err(_) => return std::ptr::null_mut(),
             };

@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use axum::{Router, error_handling::HandleError, routing::get_service, serve};
 use axum_server::tls_rustls::RustlsConfig;
 use http::StatusCode;
+use http::{HeaderName, Method};
 use tokio::net::TcpListener;
 use tonic_web::GrpcWebLayer;
 use tower::Layer;
+use tower_http::cors::AllowOrigin;
 use tower_http::trace::TraceLayer;
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -17,6 +19,39 @@ use tracing::{Level, info_span};
 use tracing::{error, info};
 
 use super::proxy::GrpcWebProxy;
+
+/// Browser-facing CORS policy for the HTTP server.
+#[derive(Debug, Clone)]
+pub struct CorsPolicy {
+    /// Allowed origin values for `Access-Control-Allow-Origin` when `allow_any_origin` is `false`.
+    pub allowed_origins: Option<Vec<http::HeaderValue>>,
+    /// Whether to allow any origin (`*`).
+    pub allow_any_origin: bool,
+    /// Allowed HTTP methods when `allow_any_method` is `false`.
+    pub allowed_methods: Option<Vec<Method>>,
+    /// Whether to allow any request method.
+    pub allow_any_method: bool,
+    /// Allowed request headers when `allow_any_header` is `false`.
+    pub allowed_headers: Option<Vec<HeaderName>>,
+    /// Whether to allow any request header.
+    pub allow_any_header: bool,
+    /// Whether to send `Access-Control-Allow-Credentials: true`.
+    pub allow_credentials: bool,
+}
+
+impl Default for CorsPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_origins: None,
+            allow_any_origin: true,
+            allowed_methods: None,
+            allow_any_method: true,
+            allowed_headers: None,
+            allow_any_header: true,
+            allow_credentials: false,
+        }
+    }
+}
 
 /// Configuration for one gRPC-Web server instance.
 #[derive(Debug, Clone)]
@@ -37,6 +72,8 @@ pub struct GrpcWebServerOptions {
     pub http_key: Option<PathBuf>,
     /// Certificate path used to enable TLS for the HTTP server.
     pub http_cert: Option<PathBuf>,
+    /// Browser-facing CORS policy for this server instance.
+    pub cors_policy: CorsPolicy,
 }
 
 impl GrpcWebServerOptions {
@@ -51,6 +88,10 @@ impl GrpcWebServerOptions {
     /// - `grpc_proxy_cert` is missing when gRPC mTLS options are partially set.
     /// - `http_key` is missing when HTTP TLS options are partially set.
     /// - `http_cert` is missing when HTTP TLS options are partially set.
+    /// - `allow_any_origin` and `allow_credentials` are both enabled.
+    /// - Origin list is empty while `allow_any_origin` is disabled.
+    /// - Method list is empty while `allow_any_method` is disabled.
+    /// - Header list is empty while `allow_any_header` is disabled.
     pub fn validate(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.grpc_proxy_key.is_some() ^ self.grpc_proxy_cert.is_some() {
             if self.grpc_ca_cert.is_none() {
@@ -71,6 +112,40 @@ impl GrpcWebServerOptions {
             if self.http_key.is_none() {
                 return Err("http_key must be defined for mTLS".into());
             }
+        }
+
+        if self.cors_policy.allow_any_origin && self.cors_policy.allow_credentials {
+            return Err("allow_any_origin cannot be used with allow_credentials".into());
+        }
+
+        if !self.cors_policy.allow_any_origin
+            && self
+                .cors_policy
+                .allowed_origins
+                .as_ref()
+                .is_none_or(|origins| origins.is_empty())
+        {
+            return Err("allowed_origins must be defined when allow_any_origin is false".into());
+        }
+
+        if !self.cors_policy.allow_any_method
+            && self
+                .cors_policy
+                .allowed_methods
+                .as_ref()
+                .is_none_or(|methods| methods.is_empty())
+        {
+            return Err("allowed_methods must be defined when allow_any_method is false".into());
+        }
+
+        if !self.cors_policy.allow_any_header
+            && self
+                .cors_policy
+                .allowed_headers
+                .as_ref()
+                .is_none_or(|headers| headers.is_empty())
+        {
+            return Err("allowed_headers must be defined when allow_any_header is false".into());
         }
 
         Ok(())
@@ -103,7 +178,7 @@ impl GrpcWebServer {
 
         router = Self::add_proxy(&server_options, router)?;
         router = Self::add_web(&server_options, router);
-        router = Self::add_cors(router);
+        router = Self::add_cors(&server_options, router);
         router = Self::add_observability(router);
 
         Ok(Self {
@@ -177,27 +252,54 @@ impl GrpcWebServer {
         }
     }
 
-    /// Applies permissive CORS suitable for browser gRPC-Web clients.
+    /// Applies configurable CORS suitable for browser gRPC-Web clients.
     ///
     /// # Arguments
+    /// - `server_options`: Source of CORS policy settings.
     /// - `router`: Router to wrap with CORS middleware.
     ///
     /// # Returns
     /// - A router with CORS middleware attached.
-    fn add_cors(router: Router) -> Router {
-        let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-            .expose_headers([
-                http::HeaderName::from_static("grpc-accept-encoding"),
-                http::HeaderName::from_static("grpc-encoding"),
-                http::HeaderName::from_static("grpc-message"),
-                http::HeaderName::from_static("grpc-status"),
-                http::HeaderName::from_static("grpc-status-details-bin"),
-                http::header::CONTENT_TYPE,
-                http::header::SET_COOKIE,
-            ]);
+    fn add_cors(server_options: &GrpcWebServerOptions, router: Router) -> Router {
+        let policy = &server_options.cors_policy;
+
+        let cors = CorsLayer::new();
+        let cors = if policy.allow_any_origin {
+            cors.allow_origin(Any)
+        } else {
+            cors.allow_origin(AllowOrigin::list(
+                policy.allowed_origins.clone().unwrap_or_default(),
+            ))
+        };
+
+        let cors = if policy.allow_any_method {
+            cors.allow_methods(Any)
+        } else {
+            cors.allow_methods(policy.allowed_methods.clone().unwrap_or_default())
+        };
+
+        let cors = if policy.allow_any_header {
+            cors.allow_headers(Any)
+        } else {
+            cors.allow_headers(policy.allowed_headers.clone().unwrap_or_default())
+        };
+
+        let cors = cors.expose_headers([
+            http::HeaderName::from_static("grpc-accept-encoding"),
+            http::HeaderName::from_static("grpc-encoding"),
+            http::HeaderName::from_static("grpc-message"),
+            http::HeaderName::from_static("grpc-status"),
+            http::HeaderName::from_static("grpc-status-details-bin"),
+            http::header::CONTENT_TYPE,
+            http::header::SET_COOKIE,
+        ]);
+
+        let cors = if policy.allow_credentials {
+            cors.allow_credentials(true)
+        } else {
+            cors
+        };
+
         router.layer(cors)
     }
 

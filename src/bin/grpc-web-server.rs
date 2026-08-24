@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use grpc_web_server::server::server::{GrpcWebServer, GrpcWebServerOptions};
+use grpc_web_server::server::server::{CorsPolicy, GrpcWebServer, GrpcWebServerOptions};
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -70,6 +70,7 @@ impl Into<GrpcWebServerOptions> for Args {
             grpc_proxy_cert: self.grpc_proxy_cert,
             http_key: self.http_key,
             http_cert: self.http_cert,
+            cors_policy: CorsPolicy::default(),
         }
     }
 }
