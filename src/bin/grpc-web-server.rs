@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use grpc_web_server::server::{GrpcWebServer, GrpcWebServerOptions};
+use grpc_web_server::server::server::{GrpcWebServer, GrpcWebServerOptions};
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};
 

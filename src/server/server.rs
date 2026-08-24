@@ -16,7 +16,7 @@ use tower_http::{
 use tracing::{Level, info_span};
 use tracing::{error, info};
 
-use crate::proxy::GrpcWebProxy;
+use super::proxy::GrpcWebProxy;
 
 /// Configuration for one gRPC-Web server instance.
 #[derive(Debug, Clone)]

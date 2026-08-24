@@ -10,7 +10,7 @@ use std::{
 use tokio::sync::oneshot;
 use tracing::{error, info};
 
-use crate::server::{GrpcWebServer, GrpcWebServerOptions};
+use super::server::{GrpcWebServer, GrpcWebServerOptions};
 
 /// Errors returned by `GrpcWebServerHandle` lifecycle operations.
 #[derive(Debug)]

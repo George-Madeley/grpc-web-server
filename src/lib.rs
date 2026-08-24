@@ -1,8 +1,12 @@
 //! gRPC-Web reverse proxy server with native Rust and C-compatible APIs.
 //!
-//! Use [`server::GrpcWebServer`] to construct and run a server from Rust, or
-//! use [`ffi`] to create opaque handles from C or C++. Each handle represents
-//! an independently configured server instance.
+//! The Rust server implementation is available through [`server::server`],
+//! while its C/C++ lifecycle API is available through [`server::ffi`]. TLS
+//! certificate-authority and leaf-certificate helpers are exposed through
+//! [`tls::ca`] and [`tls::leaf`], with corresponding C/C++ exports in
+//! [`tls::ffi`]. Each FFI function returning a non-null opaque handle transfers
+//! ownership to the caller, which must release it with the documented destroy
+//! function.
 
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
@@ -11,17 +15,10 @@
 #![warn(clippy::missing_safety_doc)]
 #![warn(clippy::unnecessary_safety_doc)]
 
-/// gRPC-Web request forwarding service.
-pub mod proxy;
-
-/// Server configuration and runtime implementation.
+/// gRPC-Web server configuration, runtime, proxy, lifecycle handle, and C/C++ API.
 pub mod server;
 
-/// Certificate-authority and leaf-certificate generation helpers.
+/// TLS certificate-authority and leaf-certificate helpers and C/C++ API.
 pub mod tls;
 
-/// C-compatible API for managing opaque server handles.
-pub mod ffi;
-
-/// Per-instance server lifecycle handle implementation.
-pub mod handle;
+mod utils;
