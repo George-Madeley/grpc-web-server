@@ -2,32 +2,56 @@ name: Release
 
 on:
   push:
-    branches: [release]
+    branches:
+      - release
+
+permissions:
+  pull-requests: write
+  contents: write
 
 jobs:
-  release:
-    name: Release
-    if: github.repository_owner == 'George-Madeley'
+  # Job 1: Handles Release PR updates or creates the GitHub Release upon PR merge
+  release-plz:
+    name: Release-plz
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      releases: ${{ steps.release-plz.outputs.releases }} # Exposes whether a release occurred
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          fetch-depth: 0 # Important: fetch history so git-cliff can read commits
+          ref: release
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall knope --no-confirm
-
-      - name: Configure git identity
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Release
+      - name: Run Release-plz
+        id: release-plz
+        uses: release-plz/action@v0.5
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-        run: knope release
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Job 2: Builds and uploads artifacts ONLY when a release is actually published
+  upload-artifacts:
+    name: Upload Release Artifacts
+    needs: release-plz
+    # Only run if Job 1 actually published a release (i.e. after you merged the Release PR)
+    if: ${{ needs.release-plz.outputs.releases != '[]' && needs.release-plz.outputs.releases != '' }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and Upload Binary Artifact
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: grpc-web-server # Replace with the exact binary name in Cargo.toml
+          target: ${{ matrix.target }}
+          token: ${{ secrets.GITHUB_TOKEN }}
