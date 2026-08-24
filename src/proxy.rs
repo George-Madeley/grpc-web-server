@@ -27,7 +27,7 @@ use tracing::debug;
 ///
 /// `GrpcWebLayer` is applied in [`new`](Self::new), so callers receive a ready-to-mount gRPC-Web service.
 #[derive(Clone)]
-pub struct Proxy {
+pub struct GrpcWebProxy {
     /// HTTP/2 client used to reach plugin upstreams.
     client: Client<hyper_rustls::HttpsConnector<HttpConnector>, TonicBody>,
     /// Upstream authority in host:port form.
@@ -35,7 +35,7 @@ pub struct Proxy {
     use_tls: bool,
 }
 
-impl Proxy {
+impl GrpcWebProxy {
     /// Builds a gRPC-Web capable proxy service.
     ///
     /// # Arguments
@@ -108,7 +108,7 @@ impl Proxy {
     }
 }
 
-impl Service<Request<TonicBody>> for Proxy {
+impl Service<Request<TonicBody>> for GrpcWebProxy {
     type Response = Response<Incoming>;
     type Error = hyper_util::client::legacy::Error;
     type Future = <Client<hyper_rustls::HttpsConnector<HttpConnector>, TonicBody> as Service<

@@ -16,29 +16,30 @@ use tower_http::{
 use tracing::{Level, info_span};
 use tracing::{error, info};
 
-use crate::proxy::Proxy;
+use crate::proxy::GrpcWebProxy;
 
+/// Configuration for one gRPC-Web server instance.
 #[derive(Debug, Clone)]
-pub struct ServerOptions {
+pub struct GrpcWebServerOptions {
     /// The address to host the HTTP/1.1 proxy/web server on.
     pub http_address: String,
-    /// The address of the gRPC server to forwarded the requests to and from
+    /// Address of the upstream gRPC server that receives proxied requests.
     pub grpc_address: String,
-    /// The directory of the static web files to host
+    /// Directory containing static web files to serve.
     pub static_dir: Option<String>,
-    /// The path to the CA cert used to generate the gRPC server and proxy certificates and keys. Required for TLS.
+    /// CA certificate path used to verify the upstream gRPC server for mTLS.
     pub grpc_ca_cert: Option<PathBuf>,
-    /// The path to the gRPC proxy private key. Required for mTLS
+    /// Client private-key path used for upstream gRPC mTLS.
     pub grpc_proxy_key: Option<PathBuf>,
-    /// The path to the gRPC proxy certification. Required for mTLS
+    /// Client certificate path used for upstream gRPC mTLS.
     pub grpc_proxy_cert: Option<PathBuf>,
-    /// The path to the HTTP private key. Required for HTTP TLS
+    /// Private-key path used to enable TLS for the HTTP server.
     pub http_key: Option<PathBuf>,
-    /// The path to the HTTP certification. Required for HTTP TLS
+    /// Certificate path used to enable TLS for the HTTP server.
     pub http_cert: Option<PathBuf>,
 }
 
-impl ServerOptions {
+impl GrpcWebServerOptions {
     /// Validates TLS and mTLS option combinations before server startup.
     ///
     /// # Returns
@@ -76,13 +77,14 @@ impl ServerOptions {
     }
 }
 
+/// Configured gRPC-Web server instance containing its router and options.
 #[derive(Debug)]
-pub struct Server {
+pub struct GrpcWebServer {
     router: Router,
-    options: ServerOptions,
+    options: GrpcWebServerOptions,
 }
 
-impl Server {
+impl GrpcWebServer {
     /// Builds a configured server instance from validated options.
     ///
     /// # Arguments
@@ -94,7 +96,7 @@ impl Server {
     /// # Errors
     /// - Any error returned by `ServerOptions::validate`.
     /// - Any error returned while constructing the upstream proxy service.
-    pub fn new(server_options: ServerOptions) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(server_options: GrpcWebServerOptions) -> Result<Self, Box<dyn std::error::Error>> {
         server_options.validate()?;
 
         let mut router = Router::new();
@@ -123,10 +125,10 @@ impl Server {
     /// - Upstream authority parsing fails.
     /// - TLS or certificate setup for the proxy fails.
     fn add_proxy(
-        server_options: &ServerOptions,
+        server_options: &GrpcWebServerOptions,
         router: Router,
     ) -> Result<Router, Box<dyn std::error::Error>> {
-        let proxy = Proxy::new(
+        let proxy = GrpcWebProxy::new(
             server_options.grpc_address.as_str(),
             server_options.grpc_ca_cert.as_deref(),
             server_options.grpc_proxy_cert.as_deref(),
@@ -162,7 +164,7 @@ impl Server {
     ///
     /// # Returns
     /// - A router that either includes static file fallback handling or is returned unchanged.
-    fn add_web(server_options: &ServerOptions, router: Router) -> Router {
+    fn add_web(server_options: &GrpcWebServerOptions, router: Router) -> Router {
         match &server_options.static_dir {
             Some(static_dir) => {
                 let path = std::path::PathBuf::from(static_dir);

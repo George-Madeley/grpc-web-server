@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use grpc_web_server::server::{Server, ServerOptions};
+use grpc_web_server::server::{GrpcWebServer, GrpcWebServerOptions};
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -59,9 +59,9 @@ struct Args {
     http_cert: Option<PathBuf>,
 }
 
-impl Into<ServerOptions> for Args {
-    fn into(self) -> ServerOptions {
-        ServerOptions {
+impl Into<GrpcWebServerOptions> for Args {
+    fn into(self) -> GrpcWebServerOptions {
+        GrpcWebServerOptions {
             http_address: self.http_address,
             grpc_address: self.grpc_address,
             static_dir: self.static_dir,
@@ -92,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Starting grpc-web-server"
     );
 
-    let server = Server::new(args.into())?;
+    let server = GrpcWebServer::new(args.into())?;
     if let Err(err) = server.start(std::future::pending()).await {
         error!(error = %err, "Server exited with error");
         return Err(err);

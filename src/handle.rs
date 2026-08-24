@@ -10,7 +10,7 @@ use std::{
 use tokio::sync::oneshot;
 use tracing::{error, info};
 
-use crate::server::{Server, ServerOptions};
+use crate::server::{GrpcWebServer, GrpcWebServerOptions};
 
 /// Errors returned by `GrpcWebServerHandle` lifecycle operations.
 #[derive(Debug)]
@@ -41,13 +41,17 @@ struct GrpcWebServerState {
     stop_tx: Option<oneshot::Sender<()>>,
 }
 
-/// Opaque handle owned by C/C++ callers.
+/// Opaque, heap-allocated handle owned by C/C++ callers.
 ///
 /// Each handle owns an independent server configuration and lifecycle state,
-/// allowing multiple server instances to run within the same process.
+/// allowing multiple server instances to run within the same process. FFI
+/// callers receive ownership through `ffi::create` and must release it exactly
+/// once through `ffi::destroy`. The handle is safe to operate from multiple
+/// threads, but its allocation must not be destroyed while another thread uses
+/// its pointer.
 pub struct GrpcWebServerHandle {
     /// Per-instance startup options used when `start` is invoked.
-    options: ServerOptions,
+    options: GrpcWebServerOptions,
     /// Mutable runtime state guarded for thread-safe FFI access.
     state: Mutex<GrpcWebServerState>,
     /// Per-instance running flag read by `is_running`.
@@ -57,9 +61,9 @@ pub struct GrpcWebServerHandle {
 impl GrpcWebServerHandle {
     /// Creates a new reusable server handle.
     ///
-    /// The handle does not start any runtime by itself. Call `start` to launch
-    /// the server thread.
-    pub fn new(options: ServerOptions) -> GrpcWebServerHandle {
+    /// The handle does not start any runtime by itself. Call [`Self::start`]
+    /// to launch the server thread.
+    pub fn new(options: GrpcWebServerOptions) -> GrpcWebServerHandle {
         GrpcWebServerHandle {
             options,
             state: Mutex::new(GrpcWebServerState::default()),
@@ -67,7 +71,7 @@ impl GrpcWebServerHandle {
         }
     }
 
-    /// Starts the server in a background thread.
+    /// Starts the server in a background thread and returns without waiting for it.
     ///
     /// # Errors
     /// - `HandleError::StatePoisoned` when the internal state lock is poisoned.
@@ -109,7 +113,7 @@ impl GrpcWebServerHandle {
             };
 
             // Create a new server.
-            let server = match Server::new(server_options) {
+            let server = match GrpcWebServer::new(server_options) {
                 Ok(server) => server,
                 Err(err) => {
                     error!("grpc-web-server: failed to create server: {err}");
@@ -165,12 +169,15 @@ impl GrpcWebServerHandle {
         Ok(())
     }
 
-    /// Returns true when the server runtime is currently marked as running.
+    /// Returns whether the server runtime is currently marked as running.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
 
     /// Requests graceful shutdown for the running runtime, if any.
+    ///
+    /// This does not wait for shutdown to complete. Use [`Self::wait`] when the
+    /// caller must wait for the server thread to exit.
     ///
     /// # Errors
     /// - `HandleError::StatePoisoned` when the internal state lock is poisoned.

@@ -1,3 +1,13 @@
+//! C-compatible API for creating and controlling gRPC-Web server instances.
+//!
+//! `create` allocates an opaque [`handle::GrpcWebServerHandle`] on the heap and
+//! transfers ownership to the caller. The returned pointer remains valid until
+//! it is passed to `destroy`, which is the only function that frees it. All
+//! other exported functions borrow the handle and do not take ownership.
+//!
+//! A caller must not use a handle after `destroy`, destroy it more than once,
+//! or call `destroy` concurrently with another operation using that handle.
+
 use std::{
     ffi::{CStr, c_char},
     path::PathBuf,
@@ -7,15 +17,24 @@ use std::{
 use tracing::error;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::{handle::GrpcWebServerHandle, server::ServerOptions};
+use crate::{handle, server};
 
+/// Logging verbosity for a server handle.
+///
+/// The first successful call to [`create`] initializes process-wide tracing
+/// with this level. Later calls leave that tracing subscriber unchanged.
 #[derive(Debug, Clone)]
 #[repr(C)]
 pub enum LogLevel {
+    /// Show only error events.
     Error,
+    /// Show warning and error events.
     Warn,
+    /// Show informational, warning, and error events.
     Info,
+    /// Show debug events and all less verbose events.
     Debug,
+    /// Show every event, including trace events.
     Trace,
 }
 
@@ -31,30 +50,36 @@ impl LogLevel {
     }
 }
 
+/// C-compatible options used to configure one gRPC-Web server handle.
+///
+/// Each non-null string pointer must refer to a valid, NUL-terminated UTF-8
+/// string for the duration of [`create`]. `create` copies each string, so the
+/// caller may release the original strings after it returns. `http_address`
+/// and `grpc_address` are required; all other string fields are optional.
 #[derive(Debug, Clone)]
 #[repr(C)]
-pub struct GrpcWebProxyOptions {
+pub struct GrpcWebServerOptions {
     /// The address to host the HTTP/1.1 proxy/web server on.
     pub http_address: *const c_char,
-    /// The address of the gRPC server to forwarded the requests to and from
+    /// Address of the upstream gRPC server that receives proxied requests.
     pub grpc_address: *const c_char,
-    /// The directory of the static web files to host
+    /// Directory containing static web files to serve.
     pub static_dir: *const c_char,
-    /// The path to the CA cert used to generate the gRPC server and proxy certificates and keys. Required for TLS.
+    /// CA certificate path used to verify the upstream gRPC server for mTLS.
     pub grpc_ca_cert: *const c_char,
-    /// The path to the gRPC proxy private key. Required for mTLS
+    /// Client private-key path used for upstream gRPC mTLS.
     pub grpc_proxy_key: *const c_char,
-    /// The path to the gRPC proxy certification. Required for mTLS
+    /// Client certificate path used for upstream gRPC mTLS.
     pub grpc_proxy_cert: *const c_char,
-    /// The path to the HTTP private key. Required for HTTP TLS
+    /// Private-key path used to enable TLS for the HTTP server.
     pub http_key: *const c_char,
-    /// The path to the HTTP certification. Required for HTTP TLS
+    /// Certificate path used to enable TLS for the HTTP server.
     pub http_cert: *const c_char,
-    /// Logging verbosity level
+    /// Process-wide tracing verbosity selected by the first created handle.
     pub log_level: LogLevel,
 }
 
-impl GrpcWebProxyOptions {
+impl GrpcWebServerOptions {
     /// Converts a nullable C string pointer into an owned Rust string.
     ///
     /// # Arguments
@@ -66,6 +91,9 @@ impl GrpcWebProxyOptions {
     ///
     /// # Errors
     /// - The bytes pointed to by `ptr` are not valid UTF-8.
+    ///
+    /// # Safety
+    /// When non-null, `ptr` must point to a valid NUL-terminated C string.
     fn c_char_to_string(ptr: *const c_char) -> Result<Option<String>, Box<dyn std::error::Error>> {
         if ptr.is_null() {
             return Ok(None);
@@ -79,7 +107,7 @@ impl GrpcWebProxyOptions {
     }
 }
 
-impl TryInto<ServerOptions> for GrpcWebProxyOptions {
+impl TryInto<server::GrpcWebServerOptions> for GrpcWebServerOptions {
     type Error = Box<dyn std::error::Error>;
 
     /// Converts FFI options into Rust server options.
@@ -91,8 +119,8 @@ impl TryInto<ServerOptions> for GrpcWebProxyOptions {
     /// - `http_address` is not provided.
     /// - `grpc_address` is not provided.
     /// - Any provided C string is not valid UTF-8.
-    fn try_into(self) -> Result<ServerOptions, Self::Error> {
-        let server_options = ServerOptions {
+    fn try_into(self) -> Result<server::GrpcWebServerOptions, Self::Error> {
+        let server_options = server::GrpcWebServerOptions {
             http_address: Self::c_char_to_string(self.http_address)?
                 .ok_or(format!("http_address must be defined"))?,
             grpc_address: Self::c_char_to_string(self.grpc_address)?
@@ -127,27 +155,37 @@ static TRACING_INIT: Once = Once::new();
 /// existing subscriber and ignore new levels.
 fn init_tracing_once(level: LogLevel) {
     TRACING_INIT.call_once(|| {
-        let filter = EnvFilter::new(format!("grpc_web_server={},tower_http=info", level.as_str()));
+        let filter = EnvFilter::new(format!(
+            "grpc_web_server={},tower_http=info",
+            level.as_str()
+        ));
         let _ = fmt().with_env_filter(filter).try_init();
     });
 }
 
-/// Creates a new server handle from FFI options.
+/// Creates a heap-allocated server handle from FFI options.
+///
+/// The returned non-null pointer transfers ownership of the allocation to the
+/// caller. Pass it to `start`, `stop`, `wait`, and `is_running` to operate on
+/// the handle, then pass it exactly once to `destroy` to release it. The
+/// handle is configured but not started by this call.
 ///
 /// # Arguments
 /// - `options`: FFI server options passed from C/C++.
 ///
 /// # Returns
-/// - Non-null pointer to a newly allocated server handle on success.
+/// - Non-null owning pointer to a newly allocated server handle on success.
 /// - Null pointer on option validation or allocation failure.
 ///
 /// # Safety
-/// - Any non-null C string pointer in `options` must be valid and NUL-terminated.
+/// - Any non-null C string pointer in `options` must be valid, NUL-terminated,
+///   and contain UTF-8.
+/// - `options.log_level` must contain a valid [`LogLevel`] discriminant.
 ///
 /// # Panics
 /// - This function catches unwinds to avoid unwinding across the FFI boundary.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn create(options: GrpcWebProxyOptions) -> *mut GrpcWebServerHandle {
+pub unsafe extern "C" fn create(options: GrpcWebServerOptions) -> *mut handle::GrpcWebServerHandle {
     std::panic::catch_unwind(|| {
         init_tracing_once(options.log_level.clone());
 
@@ -159,7 +197,7 @@ pub unsafe extern "C" fn create(options: GrpcWebProxyOptions) -> *mut GrpcWebSer
             }
         };
 
-        let handle = GrpcWebServerHandle::new(server_options);
+        let handle = handle::GrpcWebServerHandle::new(server_options);
         Box::into_raw(Box::new(handle))
     })
     .unwrap_or(std::ptr::null_mut())
@@ -175,12 +213,14 @@ pub unsafe extern "C" fn create(options: GrpcWebProxyOptions) -> *mut GrpcWebSer
 /// - `false` when `handle` is null, already running, or startup fails.
 ///
 /// # Safety
-/// - `handle` must point to a valid handle created by `create`.
+/// - `handle` must be a non-null pointer returned by `create` that has not
+///   been passed to `destroy`.
+/// - No thread may call `destroy` while this function is using `handle`.
 ///
 /// # Panics
 /// - This function catches unwinds to avoid unwinding across the FFI boundary.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn start(handle: *mut GrpcWebServerHandle) -> bool {
+pub unsafe extern "C" fn start(handle: *mut handle::GrpcWebServerHandle) -> bool {
     std::panic::catch_unwind(|| {
         if handle.is_null() {
             return false;
@@ -210,12 +250,14 @@ pub unsafe extern "C" fn start(handle: *mut GrpcWebServerHandle) -> bool {
 /// - `false` when `handle` is null.
 ///
 /// # Safety
-/// - `handle` must point to a valid handle created by `create`.
+/// - `handle` must be a non-null pointer returned by `create` that has not
+///   been passed to `destroy`.
+/// - No thread may call `destroy` while this function is using `handle`.
 ///
 /// # Panics
 /// - This function catches unwinds to avoid unwinding across the FFI boundary.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn wait(handle: *mut GrpcWebServerHandle) -> bool {
+pub unsafe extern "C" fn wait(handle: *mut handle::GrpcWebServerHandle) -> bool {
     std::panic::catch_unwind(|| {
         if handle.is_null() {
             return false;
@@ -242,12 +284,14 @@ pub unsafe extern "C" fn wait(handle: *mut GrpcWebServerHandle) -> bool {
 /// - `false` when `handle` is null.
 ///
 /// # Safety
-/// - `handle` must point to a valid handle created by `create`.
+/// - `handle` must be a non-null pointer returned by `create` that has not
+///   been passed to `destroy`.
+/// - No thread may call `destroy` while this function is using `handle`.
 ///
 /// # Panics
 /// - This function does not intentionally panic.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn is_running(handle: *const GrpcWebServerHandle) -> bool {
+pub unsafe extern "C" fn is_running(handle: *const handle::GrpcWebServerHandle) -> bool {
     if handle.is_null() {
         return false;
     }
@@ -266,12 +310,14 @@ pub unsafe extern "C" fn is_running(handle: *const GrpcWebServerHandle) -> bool 
 /// - `false` when `handle` is null.
 ///
 /// # Safety
-/// - `handle` must point to a valid handle created by `create`.
+/// - `handle` must be a non-null pointer returned by `create` that has not
+///   been passed to `destroy`.
+/// - No thread may call `destroy` while this function is using `handle`.
 ///
 /// # Panics
 /// - This function catches unwinds to avoid unwinding across the FFI boundary.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn stop(handle: *mut GrpcWebServerHandle) -> bool {
+pub unsafe extern "C" fn stop(handle: *mut handle::GrpcWebServerHandle) -> bool {
     std::panic::catch_unwind(|| {
         if handle.is_null() {
             return false;
@@ -301,10 +347,11 @@ pub unsafe extern "C" fn stop(handle: *mut GrpcWebServerHandle) -> bool {
 /// - `false` when `handle` is null.
 ///
 /// # Safety
-/// - `handle` must be a pointer returned by `create`.
-/// - `handle` must be destroyed at most once.
+/// - `handle` must be a non-null owning pointer returned by `create`.
+/// - `handle` must not have been passed to `destroy` before.
+/// - No thread may be using `handle` when this function is called.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn destroy(handle: *mut GrpcWebServerHandle) -> bool {
+pub unsafe extern "C" fn destroy(handle: *mut handle::GrpcWebServerHandle) -> bool {
     std::panic::catch_unwind(|| {
         if handle.is_null() {
             return false;
