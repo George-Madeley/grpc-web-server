@@ -1,0 +1,31 @@
+[workspace]
+# Tells release-plz to create GitHub releases
+git_release_enable = true
+# PR branch prefix
+pr_branch_prefix = "ci/"
+# add the `release` label to the release Pull Request
+pr_labels = ["release"]
+# Includes GitHub release notes alongside the tag
+git_release_name = "v{{ version }}"
+git_release_body = "{{ changelog }}"
+git_tag_enable = true
+git_only = true
+publish = false
+
+[changelog]
+header = "# Changelog"
+trim = true
+sort_commits = "newest"
+commit_preprocessors = [
+  # remove issue numbers from commits
+  { pattern = '\((\w+\s)?#([0-9]+)\)', replace = "" },
+]
+# Customize header sections based on your Conventional Commits
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^doc", group = "Documentation" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^.*", skip = true },                 # Hide chores, tests, and styles from the changelog
+]
