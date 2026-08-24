@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    branches: [release]
+
+jobs:
+  release:
+    name: Release
+    if: github.repository_owner == 'George-Madeley'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall knope --no-confirm
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+        run: knope release

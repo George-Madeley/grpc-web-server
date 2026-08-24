@@ -2,6 +2,8 @@
 name = "grpc-web-server"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A gRPC web proxy library and app written in Rust with a built in HTTP web server"
 
 [workspace]
 resolver = "3"

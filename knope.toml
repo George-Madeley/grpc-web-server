@@ -1,0 +1,32 @@
+[package]
+versioned_files = ["Cargo.toml"]
+changelog = "CHANGELOG.md"
+assets = ["target/release/grpc-web-server"]
+
+[github]
+owner = "George-Madeley"
+repo = "grpc-web-server"
+
+[[workflows]]
+name = "release"
+
+# Bumps Cargo.toml + writes CHANGELOG.md from conventional commits, stages the changes.
+[[workflows.steps]]
+type = "PrepareRelease"
+
+[[workflows.steps]]
+type = "Command"
+command = "git commit -m \"chore: release $version [skip ci]\""
+
+[[workflows.steps]]
+type = "Command"
+command = "git push"
+
+# Must run before the Release step so the asset file exists to upload.
+[[workflows.steps]]
+type = "Command"
+command = "cargo build --release --bin grpc-web-server"
+
+# Tags the commit, creates the GitHub release, uploads configured assets.
+[[workflows.steps]]
+type = "Release"
