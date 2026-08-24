@@ -8,6 +8,7 @@
 //! ownership to the caller, which must release it with the documented destroy
 //! function.
 
+#![doc = include_str!("../README.md")]
 #![warn(missing_docs)]
 #![warn(clippy::missing_docs_in_private_items)]
 #![warn(clippy::missing_errors_doc)]

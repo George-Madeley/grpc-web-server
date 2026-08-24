@@ -27,5 +27,7 @@ add_library(GrpcWebServer ALIAS ${GRPC_WEB_SERVER_RUST_TARGET})
 target_sources(${GRPC_WEB_SERVER_RUST_TARGET} INTERFACE
   FILE_SET HEADERS
   BASE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/gen/include
-  FILES ${CMAKE_CURRENT_SOURCE_DIR}/gen/include/grpc_web_server.h
+  FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/gen/include/server.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/gen/include/tls.h
 )
